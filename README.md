@@ -30,3 +30,9 @@ sMAP Driver
 You can then use the ``pybacnet.driver.BACnetDriver`` module to poll your
 BACnet points and send data to a sMAP server.  The driver contains several
 options for cleaning up BACnet names.
+
+Alternative Driver
+------------------
+An alternative driver has been provided for polling. This takes advantage
+of a few additional features, such as polling multiple properties in a
+device at once. See /tools/SimpleDataPoller/SimpleDataPoller.py
