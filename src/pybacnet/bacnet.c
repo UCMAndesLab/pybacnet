@@ -1,16 +1,16 @@
 /**************************************************************************
  * This file is part of pybacnet.
- * 
+ *
  * pybacnet is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- * 
+ *
  * pybacnet is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with pybacnet.  If not, see <http://www.gnu.org/licenses/>.
  *
@@ -62,6 +62,35 @@ int PyList_Append_Steal(PyObject *list, PyObject *item) {
   return r;
 }
 
+// Checkers
+bool checkObjectType(BACNET_OBJECT_TYPE object_type){
+   if(object_type >= MAX_BACNET_OBJECT_TYPE){
+      // Print error
+      PyErr_Format(PyExc_ValueError, "Invalid object type.");
+      return false;
+   }
+   return true;
+}
+
+bool checkObjectInstance(uint32_t object_instance){
+   if(object_instance >= BACNET_MAX_INSTANCE){
+      // Print error
+      PyErr_Format(PyExc_ValueError, "Invalid object instance.");
+      return false;
+   }
+   return true;
+}
+
+bool checkObjectPropertyID(BACNET_PROPERTY_ID property_id){
+   if(property_id >= MAX_BACNET_PROPERTY_ID ){
+      // Print error
+      PyErr_Format(PyExc_ValueError, "Invalid object property identifier.");
+      return false;
+   }
+   return true;
+}
+
+
 /* All included BACnet objects */
 static object_functions_t Object_Table[] = {
     {DEVICE_OBJ_FUNCTIONS},
@@ -83,6 +112,8 @@ static pthread_mutex_t busy = PTHREAD_MUTEX_INITIALIZER;
 
 typedef enum {
     READ_PROPERTY,
+    READ_MULTIPLE_PROPERTY,
+    READ_RANGE_PROPERTY,
     WRITE_PROPERTY,
     ATOMIC_WRITE_FILE,
     ATOMIC_READ_FILE,
@@ -129,6 +160,8 @@ void MyRejectHandler(
     PyErr_Format(PyExc_IOError, "BACnet reject: %s",
                  bactext_reject_reason_name(reject_reason));
 }
+
+
 
 /** decode_data - decodes bacnet properties to python objects
   * based on bacapp.c:bacapp_print_value()
@@ -193,7 +226,7 @@ static PyObject *decode_data(BACNET_READ_PROPERTY_DATA * data) {
             }
             application_data += len;  //Increment ptr
             application_data_len -= len;
-        }   
+        }
     }
     if (PyList_Size(ret) == 1) {
         PyObject *new_ret = PyList_GetItem(ret, 0);
@@ -215,6 +248,97 @@ void My_Read_Property_Ack_Handler(
     BACNET_READ_PROPERTY_DATA data;
 
     len = rp_ack_decode_service_request(service_request, service_len, &data);
+    fprintf(stderr, "receive: %i %i\n", service_data->invoke_id, outstanding.invoke_id);
+    if (len > 0 &&
+        outstanding.dest &&
+        address_match(src, outstanding.dest)) {
+            read_result = decode_data(&data);
+        }
+}
+
+/** Handler for a ReadRangeProperty ACK. */
+// Based on bacnet-stack readpropm.c
+
+// Free all rpm data and print if successful
+void handleRPMData(BACNET_READ_ACCESS_DATA *rpm_data, bool successful){
+   BACNET_PROPERTY_REFERENCE *rpm_property;
+   BACNET_PROPERTY_REFERENCE *old_rpm_property;
+   BACNET_READ_ACCESS_DATA *old_rpm_data;
+   BACNET_APPLICATION_DATA_VALUE *value;
+   BACNET_APPLICATION_DATA_VALUE *old_value;     
+
+   // Get Data 
+   while (rpm_data) {
+      printf("HI\n\n");
+      if(successful){
+         rpm_ack_print_data(rpm_data);
+         read_result = decode_data(&rpm_data);
+      }
+      rpm_property = rpm_data->listOfProperties;
+
+      // Get Properties
+      while (rpm_property) {
+
+         // Get new values 
+         value = rpm_property->value;
+         while (value) {
+            old_value = value;
+            value = value->next;
+            free(old_value);
+         }
+
+         // release property
+         old_rpm_property = rpm_property;
+         rpm_property = rpm_property->next;
+         free(old_rpm_property);
+      }
+
+      // release data
+      old_rpm_data = rpm_data;
+      rpm_data = rpm_data->next;
+      free(old_rpm_data);
+   }
+}
+
+void Read_Multiple_Property_Ack_Handler(
+    uint8_t * service_request,
+    uint16_t service_len,
+    BACNET_ADDRESS * src,
+    BACNET_CONFIRMED_SERVICE_ACK_DATA * service_data){
+
+    int len = 0;
+    bool successful = false;
+    BACNET_READ_ACCESS_DATA *rpm_data;
+
+    fprintf(stdout, "MULTIPLE PROP HANDLER CHECKPOINT\n");
+    // Allocate space
+    rpm_data = calloc(1, sizeof(BACNET_READ_ACCESS_DATA));
+    if (rpm_data) {
+      len =
+        rpm_ack_decode_service_request(service_request, service_len,
+        rpm_data);
+    }
+    
+    successful = len>0;
+    // Log Failure
+    if(!successful){
+      fprintf(stderr, "RPM Ack Malformed! Freeing memory...\n");
+    }else{
+      fprintf(stdout, "DECODING DATA!\n");
+    }
+    handleRPMData(rpm_data, successful);
+}
+
+/** Handler for a ReadRangeProperty ACK. */
+void My_Read_Range_Property_Ack_Handler(
+    uint8_t * service_request,
+    uint16_t service_len,
+    BACNET_ADDRESS * src,
+    BACNET_CONFIRMED_SERVICE_ACK_DATA * service_data) {
+    int len = 0;
+    BACNET_READ_RANGE_DATA data;
+
+    len = rr_ack_decode_service_request(service_request, service_len, &data);
     // fprintf(stderr, "receive: %i %i\n", service_data->invoke_id, outstanding.invoke_id);
     if (len > 0 &&
         outstanding.dest &&
@@ -304,6 +428,15 @@ void Init(char *interface, char *port) {
     */
     apdu_set_confirmed_ack_handler(SERVICE_CONFIRMED_READ_PROPERTY,
         My_Read_Property_Ack_Handler);
+    apdu_set_confirmed_handler(SERVICE_CONFIRMED_READ_RANGE,
+        My_Read_Range_Property_Ack_Handler);
+
+    apdu_set_confirmed_handler(SERVICE_CONFIRMED_READ_PROP_MULTIPLE,
+      Read_Multiple_Property_Ack_Handler);
+    apdu_set_confirmed_ack_handler(SERVICE_CONFIRMED_READ_PROP_MULTIPLE,
+      Read_Multiple_Property_Ack_Handler);
+
+
     apdu_set_confirmed_simple_ack_handler(SERVICE_CONFIRMED_WRITE_PROPERTY,
         MyWritePropertySimpleAckHandler);
     apdu_set_confirmed_ack_handler(SERVICE_CONFIRMED_ATOMIC_WRITE_FILE,
@@ -353,6 +486,82 @@ static int array_from_list(PyObject *list, uint8_t *array, unsigned int maxlen) 
 }
 
 
+/* Tao -- I added the whois with range for better deivce discovery.
+ * Some of the devices might ignor the -1 range.
+ */
+PyObject *whois_range(unsigned int timeout_seconds, unsigned int range_start, unsigned int range_end) {
+    int i;
+    BACNET_ADDRESS address;
+    uint32_t device_id = 0;
+    unsigned max_apdu = 0;
+
+    BACNET_ADDRESS src = { 0 };
+    uint16_t pdu_len = 0;
+    time_t current_seconds = 0;
+    time_t last_seconds = time(NULL);
+    time_t total_seconds = 0;
+    PyObject * ret = NULL;
+
+    Error_Detected = false;
+    /* Send whois message with the given range */
+    /*
+    Send_WhoIs(-1, -1);
+    */
+    Send_WhoIs(range_start, range_end);
+
+    outstanding.invoke_id = 0;
+    outstanding.dest = NULL;
+
+    Py_BEGIN_ALLOW_THREADS;
+    pthread_mutex_lock(&busy);
+    Py_END_ALLOW_THREADS;
+
+    while(true) {
+        /* increment timer - exit if timed out */
+        current_seconds = time(NULL);
+
+        /* returns 0 bytes on timeout */
+        Py_BEGIN_ALLOW_THREADS;
+        pdu_len = datalink_receive(&src, &Rx_Buf[0], MAX_MPDU, 100);
+        Py_END_ALLOW_THREADS;
+        if (pdu_len) {
+            npdu_handler(&src, &Rx_Buf[0], pdu_len);
+        }
+        if (Error_Detected) {
+            break;
+        }
+
+        /* increment timer - exit if timed out */
+        total_seconds += current_seconds - last_seconds;
+        last_seconds = current_seconds;
+        if (total_seconds > timeout_seconds) {
+            break;
+        }
+    }
+    pthread_mutex_unlock(&busy);
+
+    /* Pull the servers we got */ 
+    ret = PyList_New(0);
+    if (!ret)  {
+        PyErr_SetNone(PyExc_MemoryError);
+        return NULL;
+    }
+    for (i = 0; i < MAX_ADDRESS_CACHE; i++) {
+        if (address_get_by_index(i, &device_id, &max_apdu, &address)) {
+            PyObject *rec = PyDict_New();
+            PyDict_SetItemString_Steal(rec, "device_id", Py_BuildValue("I",device_id));
+            PyDict_SetItemString_Steal(rec, "max_apdu", Py_BuildValue("I",max_apdu));
+            PyDict_SetItemString_Steal(rec, "mac", list_from_array(address.mac, address.mac_len));
+            PyDict_SetItemString_Steal(rec, "net", Py_BuildValue("I",address.net));
+            PyDict_SetItemString_Steal(rec, "adr", list_from_array(address.adr, address.len));
+
+            PyList_Append_Steal(ret, rec);
+        }
+    }
+
+    return ret;
+}
+
 PyObject *whois(unsigned int timeout_seconds) {
     int i; 
     BACNET_ADDRESS address;
@@ -378,7 +587,7 @@ PyObject *whois(unsigned int timeout_seconds) {
     while(true) {
         /* increment timer - exit if timed out */
         current_seconds = time(NULL);
-        
+
         /* returns 0 bytes on timeout */
         Py_BEGIN_ALLOW_THREADS;
         pdu_len = datalink_receive(&src, &Rx_Buf[0], MAX_MPDU, 100);
@@ -463,12 +672,19 @@ static uint8_t send_req(command_type_t type, BACNET_ADDRESS *dest, unsigned max_
         &npdu_data);
 
     if (type == READ_PROPERTY) {
-        len = rp_encode_apdu(&Handler_Transmit_Buffer[pdu_len], 
-                             invoke_id, 
+        len = rp_encode_apdu(&Handler_Transmit_Buffer[pdu_len],
+                             invoke_id,
                              (BACNET_READ_PROPERTY_DATA *)data);
+    } else if (type == READ_RANGE_PROPERTY) {
+        len = rr_encode_apdu(&Handler_Transmit_Buffer[pdu_len],
+                             invoke_id,
+                             (BACNET_READ_RANGE_DATA *)data);
+    } else if (type == READ_MULTIPLE_PROPERTY) {
+         len = rpm_encode_apdu(&Handler_Transmit_Buffer[pdu_len], max_apdu - pdu_len, invoke_id,
+            (BACNET_READ_ACCESS_DATA *) data);
     } else if (type == WRITE_PROPERTY) {
-        len = wp_encode_apdu(&Handler_Transmit_Buffer[pdu_len], 
-                             invoke_id, 
+        len = wp_encode_apdu(&Handler_Transmit_Buffer[pdu_len],
+                             invoke_id,
                              (BACNET_WRITE_PROPERTY_DATA *)data);
     } else if (type == ATOMIC_WRITE_FILE) {
         len = awf_encode_apdu(&Handler_Transmit_Buffer[pdu_len],
@@ -482,6 +698,10 @@ static uint8_t send_req(command_type_t type, BACNET_ADDRESS *dest, unsigned max_
 	PyErr_SetString(PyExc_ValueError, "send_req: invalid request type");
         return 0;
     }
+    if(len <= 0){
+       printf("No data was sent.");
+    }
+
 
     pdu_len += len;
     if ((unsigned) pdu_len < max_apdu) {
@@ -492,8 +712,7 @@ static uint8_t send_req(command_type_t type, BACNET_ADDRESS *dest, unsigned max_
                               &Handler_Transmit_Buffer[0], pdu_len);
         if (bytes_sent <= 0) {
             tsm_free_invoke_id(invoke_id);
-            PyErr_Format(PyExc_IOError, "Failed to Send Request (%s)!",
-                         strerror(errno));
+            PyErr_Format(PyExc_IOError, "Failed to Send Request (%s)!!");
             return 0;
         }
     } else {
@@ -513,7 +732,10 @@ static int wait_reply(uint8_t invoke_id) {
     time_t last_seconds = time(NULL);;
     time_t current_seconds = 0;
     time_t elapsed_seconds = 0;
-    time_t timeout_seconds = (apdu_timeout() / 1000) * apdu_retries();
+    // Tao: Ugly hack: set the timeout to 2 seconds.
+    //      Need to change it to allow flexible timeout.
+    time_t timeout_seconds = 2;
+    // time_t timeout_seconds = (apdu_timeout() / 1000) * apdu_retries();
 
     Error_Detected = false;
     last_seconds = time(NULL);
@@ -525,21 +747,28 @@ static int wait_reply(uint8_t invoke_id) {
           tsm_timer_milliseconds(((current_seconds - last_seconds) * 1000));
         }
         if (Error_Detected) {
+            PyErr_Format(PyExc_IOError, "An error was detected!");
             break;
           }
 
+        // Is the id no longer being used?
         if (tsm_invoke_id_free(invoke_id)) {
+            printf("Invoke ID freed.\n");
             break;
+
+        // Did we fail to get a message?
         } else if (tsm_invoke_id_failed(invoke_id)) {
-            //fprintf(stderr, "Error: TSM Timeout!\n");
+            PyErr_Format(PyExc_IOError, "Error: TSM Timeout!\n");
             Error_Detected = true;
             break;
         }
 
         /* returns 0 bytes on 100ms timeout */
-        Py_BEGIN_ALLOW_THREADS;
+        // Disable python GIL. This lock will forbid other python process (not only threads)
+        // to run.
+        // Py_BEGIN_ALLOW_THREADS;
         pdu_len = datalink_receive(&src, &Rx_Buf[0], MAX_MPDU, 100);
-        Py_END_ALLOW_THREADS;
+        // Py_END_ALLOW_THREADS;
 
         got_data = got_data | Rx_Buf[0];
         tmp = src;
@@ -548,22 +777,25 @@ static int wait_reply(uint8_t invoke_id) {
              * here we use &tmp because in bacnet-stack-0.6.0, the len field in the BACNET_ADDRESS
              * struct gets set to 0 in the case of an NPDU error
              */
+            printf("Handler called %d\n", pdu_len);
             npdu_handler(&tmp, &Rx_Buf[0], pdu_len);
-        } 
+        }
 
         elapsed_seconds += (current_seconds - last_seconds);
         last_seconds = current_seconds;
-        // fprintf(stderr, "Elapsed: %i timeout: %i\n", elapsed_seconds, timeout_seconds);
+        // if (PRINT_ENABLED) fprintf(stderr, "Elapsed: %i timeout: %i\n", elapsed_seconds, timeout_seconds);
         if (elapsed_seconds > timeout_seconds) {
             PyErr_Format(PyExc_IOError, "Timeout waiting for reply");
             return 0;
         }
     }
 
-    if (got_data && !Error_Detected) {
-        return 1;
-    } else {
+    if (Error_Detected || !got_data) {
+        PyErr_Format(PyExc_IOError, "No Data or Error.");
         return 0;
+    } else {
+        //PyErr_Format(PyExc_IOError, "Data was received..");
+        return 1;
     }
 }
 
@@ -576,10 +808,13 @@ PyObject *read_prop(PyObject *dev, uint32_t object_type, uint32_t object_instanc
     BACNET_READ_PROPERTY_DATA data;
 
     // printf("tsm: %i invoke_ids available\n", tsm_transaction_idle_count());
-
+    
+    // Check to see if input is valid
     if (object_type > MAX_BACNET_OBJECT_TYPE ||
         object_instance > BACNET_MAX_INSTANCE ||
         object_property > MAX_BACNET_PROPERTY_ID) {
+
+        PyErr_Format(PyExc_ValueError, "Improper input.");
         Py_RETURN_NONE;
     }
    
@@ -603,10 +838,75 @@ PyObject *read_prop(PyObject *dev, uint32_t object_type, uint32_t object_instanc
     Py_END_ALLOW_THREADS;
 
     if ((invoke_id = send_req(READ_PROPERTY, &dest, max_apdu, &data)) == 0) {
+        PyErr_Format(PyExc_ValueError, "Thread blocked.");
+        pthread_mutex_unlock(&busy);
+
+        return NULL;
+    }
+
+    // Tao
+    // if (PRINT_ENABLED) printf("send_req, id %d\n", invoke_id);
+
+    /* Recieve Reply */
+    outstanding.invoke_id = invoke_id;
+    outstanding.dest = &dest;
+    read_result = NULL;
+
+    if (wait_reply(invoke_id) && read_result != NULL) {
+        tsm_free_invoke_id(invoke_id);
+        // Tao
+        // printf("Got reply for %d, buffer@%p\n", invoke_id,Rx_Buf);
+        // Sleep for 100 millisecond
+        // usleep(100ul);
+
+        pthread_mutex_unlock(&busy);
+        return read_result;
+    } else {
+        tsm_free_invoke_id(invoke_id);
+        // Tao
+        printf("Reply timeout for %d\n", invoke_id);
+        pthread_mutex_unlock(&busy);
+        return NULL;    /* SDH : wait_reply sets the exception code */
+    }
+}
+
+PyObject *read_rangeprop(PyObject *dev, uint32_t object_type, uint32_t object_instance, uint32_t object_property, int32_t array_index){
+    uint32_t device_id;
+    unsigned max_apdu = 0;
+    BACNET_ADDRESS dest;
+    uint8_t invoke_id = 0;
+    BACNET_READ_RANGE_DATA data;
+
+    // Check to see if input is valid
+    if (object_type > MAX_BACNET_OBJECT_TYPE ||
+        object_instance > BACNET_MAX_INSTANCE ||
+        object_property > MAX_BACNET_PROPERTY_ID) {
+        Py_RETURN_NONE;
+    }
+   
+    /* Unpack device object */ 
+    if (!parse_dev(dev, &device_id, &max_apdu, &dest)) {
+        PyErr_SetNone(PyExc_ValueError);
+        return NULL;
+    }
+
+    data.RequestType= RR_READ_ALL;
+    data.object_type = OBJECT_DEVICE;
+    data.object_instance = object_instance; 
+    data.object_property = PROP_DEVICE_ADDRESS_BINDING;
+    data.array_index = 0;
+
+    /* Send Read Prop */
+    Py_BEGIN_ALLOW_THREADS;
+    pthread_mutex_lock(&busy);
+    Py_END_ALLOW_THREADS;
+
+    if ((invoke_id = send_req(READ_PROPERTY, &dest, max_apdu, &data)) == 0) {
         pthread_mutex_unlock(&busy);
         return NULL;
     }
 
+    
     /* Recieve Reply */
     outstanding.invoke_id = invoke_id;
     outstanding.dest = &dest;
@@ -617,9 +917,145 @@ PyObject *read_prop(PyObject *dev, uint32_t object_type, uint32_t object_instanc
         return read_result;
     } else {
         tsm_free_invoke_id(invoke_id);
+	// Tao
+	printf("Reply timeout for %d\n", invoke_id);
         pthread_mutex_unlock(&busy);
         return NULL;    /* SDH : wait_reply sets the exception code */
     }
+}
+
+PyObject *read_multiple_prop(PyObject *dev, PyObject *objectList){
+   // objectList
+   // objectList[0] = object_type
+   // objectList[1] = object_instance
+   // objectList[2] = object_property
+   // objectList[3] = array_index
+
+   // Parse Object List
+   int listSize;
+   PyObject *strObj;
+   int line;
+   int i, j;
+
+   // Number of arguments per request
+   int ARG_SIZE = 4;
+
+   // Bacnet Variables
+   BACNET_READ_ACCESS_DATA *rpm_object;
+   BACNET_READ_ACCESS_DATA *head;
+   BACNET_PROPERTY_REFERENCE *rpm_property;
+   uint8_t buffer[MAX_PDU] = {0};
+
+   uint32_t device_id;
+   unsigned max_apdu = 0;
+   BACNET_ADDRESS dest;
+   uint8_t invoke_id = 0;
+
+    
+   
+    /* Unpack device object */ 
+    if (!parse_dev(dev, &device_id, &max_apdu, &dest)) {
+        PyErr_SetNone(PyExc_ValueError);
+        return NULL;
+    }
+
+   if (! PyList_Check(objectList)) return NULL;
+   listSize = PyList_Size(objectList);
+
+   if(listSize <= 0) return NULL;
+
+   // Data should be grouped in 4s
+   if(listSize % ARG_SIZE != 0){
+      PyErr_Format(PyExc_ValueError, "Needs to be divisible by 4");
+      return NULL;
+   }
+
+   rpm_object = calloc(1, sizeof(BACNET_READ_ACCESS_DATA));
+
+   // Keep track of head
+   head = rpm_object;
+
+   // Form a packet
+   for(i = 0; i< listSize/ARG_SIZE; i++){
+      rpm_object->object_type = PyInt_AsLong(PyList_GetItem(objectList, i*ARG_SIZE + 0));
+      rpm_object->object_instance = PyInt_AsLong(PyList_GetItem(objectList, i*ARG_SIZE + 1));
+      
+      // Currently we only accept a single pair of prop identifier and array position 
+      // Allocate space for the property
+      rpm_property = calloc(1, sizeof(BACNET_PROPERTY_REFERENCE));
+      rpm_object->listOfProperties = rpm_property;
+
+      rpm_property->propertyIdentifier = PyInt_AsLong(PyList_GetItem(objectList, i*ARG_SIZE + 2));
+      rpm_property->propertyArrayIndex = PyInt_AsLong(PyList_GetItem(objectList, i*ARG_SIZE + 3));
+
+      // Set to read all if less then 0
+      if(rpm_property->propertyArrayIndex < 0){
+         rpm_property->propertyArrayIndex = -1; 
+      }
+      rpm_property->next = NULL;
+
+      // Check to see if all values are valid
+      if( !(checkObjectType(rpm_object->object_type)
+            && checkObjectInstance(rpm_object->object_instance)
+            && checkObjectPropertyID(rpm_property->propertyIdentifier)) ){
+         // REMEMBER TO FREE MEMORY OR YOU WILL GET A LEAK HERE!
+         return NULL; 
+      }
+
+      printf("Object Type: %d\nObject Instance: %d\nIdentifier:%d\nArray:%d\n"
+            , rpm_object->object_type, rpm_object->object_instance, rpm_object->listOfProperties->propertyIdentifier, rpm_object->listOfProperties->propertyArrayIndex );
+
+      // If we are not the last value, add to link list
+      if(i+1 != listSize/ARG_SIZE){
+         printf("Another value\n");
+         rpm_object->next = calloc(1, sizeof(BACNET_PROPERTY_REFERENCE));
+         rpm_object = rpm_object->next;
+      }else{
+         printf("That is a wrap\n");
+         break;
+      }
+   }
+
+   fprintf(stdout, "Packet Made\n");
+
+   rpm_object = head;
+
+   Py_BEGIN_ALLOW_THREADS;
+   pthread_mutex_lock(&busy);
+   Py_END_ALLOW_THREADS;
+
+   // Send Request
+   fprintf(stdout, "Sending Request\n");
+   invoke_id = send_req(READ_MULTIPLE_PROPERTY, &dest, max_apdu, rpm_object);
+
+   // Request Failed
+   if(invoke_id == 0){
+      PyErr_Format(PyExc_ValueError, "Request Failed.");
+      return NULL;
+   }
+   outstanding.invoke_id = invoke_id;
+   outstanding.dest = &dest;
+
+   fprintf(stdout, "Request Sent Succesfully\n");
+   read_result = NULL;
+
+   if (wait_reply(invoke_id) && read_result != NULL) {
+       fprintf(stdout, "EURIKA\n");
+       tsm_free_invoke_id(invoke_id);
+       pthread_mutex_unlock(&busy);
+       return read_result;
+   } else {
+       tsm_free_invoke_id(invoke_id);
+       printf("Reply time out for %d with val %d\n", invoke_id, read_result);
+
+       if(read_result == NULL){
+         PyErr_Format(PyExc_ValueError, "Data was not read.");
+       }
+
+       pthread_mutex_unlock(&busy);
+       return NULL;    /* SDH : wait_reply sets the exception code */
+   }
+
 }
 
 

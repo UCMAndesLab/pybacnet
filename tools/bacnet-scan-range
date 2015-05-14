@@ -52,6 +52,8 @@ def main():
                     help='Network interface to broadcast over')
   parser.add_option('-p', '--ip-filter', dest='fip', default=None,
                     help='Filter devices by IP prefix')
+  parser.add_option('-r', '--device-range', dest='range',default='-1_-1',
+                    help='BACnet device number range. Example: 10_100')
 
   opts, args = parser.parse_args()
   filename = args[0] if len(args) else '-'
@@ -67,7 +69,11 @@ def main():
   # Discover and store devices
   #pdb.set_trace()
   # bacnet.whois(timeout). Timeout is in seconds.
-  devs = bacnet.whois(5)
+  tmp = opts.range.split('_')
+  range_start = int(tmp[0])
+  range_end = int(tmp[1])
+  print 'Scanning device range', range_start, ',', range_end
+  devs = bacnet.whois_range(5, range_start, range_end)
   print >>sys.stderr, "Found", len(devs), "devices"
   print >>sys.stderr, opts.fip
   
@@ -78,6 +84,11 @@ def main():
     mac = '.'.join([str(i) for i in h_dev['mac']])
     # dbg(mac)
     if not opts.fip or mac.startswith(opts.fip):
+      # Tao -- Some device (id > 70000) always respond to the whois command.
+      # Ignor the devices that are not in the range.
+      if (range_start > 0 and range_end > 0) and (h_dev['device_id'] < range_start or h_dev['device_id'] > range_end):
+        continue
+
       # Dev filter
       objs = []
       try:
@@ -143,7 +154,7 @@ def main():
           })
       print >>sys.stderr, device['name'], "has", len(device['objs']), "objects"
       device_list.append(device)
-  json.dump(device_list, fout)
+  json.dump(device_list, fout, indent=2)
   fout.close()
 
 if __name__ == "__main__":
