@@ -32,6 +32,7 @@ const char * type_str(unsigned index);
 const char * prop_str(unsigned index);
 const char * unit_str(unsigned index);
 %}
+
 %include "stdint.i"
 %include "bacenum.h"
 void Init(char *interface, char *port);

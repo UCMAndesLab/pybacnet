@@ -48,19 +48,10 @@
 #include "awf.h"
 #include "arf.h"
 
-int PyDict_SetItemString_Steal(PyObject *p, const char *key, PyObject *val) {
-  int r = PyDict_SetItemString(p, key, val);
-  assert(val->ob_refcnt > 1);
-  Py_DECREF(val);
-  return r;
-}
+// Our libraries
+#include "read_multiple_properties.h"
+#include "swig_helper.h"
 
-int PyList_Append_Steal(PyObject *list, PyObject *item) {
-  int r = PyList_Append(list, item);
-  assert(val->ob_refcnt > 1);
-  Py_DECREF(item);
-  return r;
-}
 
 // Checkers
 bool checkObjectType(BACNET_OBJECT_TYPE object_type){
@@ -167,6 +158,7 @@ void MyRejectHandler(
   * based on bacapp.c:bacapp_print_value()
   */
 
+
 static PyObject *decode_data(BACNET_READ_PROPERTY_DATA * data) {               
     BACNET_APPLICATION_DATA_VALUE value;
     int len = 0;
@@ -259,46 +251,7 @@ void My_Read_Property_Ack_Handler(
 /** Handler for a ReadRangeProperty ACK. */
 // Based on bacnet-stack readpropm.c
 
-// Free all rpm data and print if successful
-void handleRPMData(BACNET_READ_ACCESS_DATA *rpm_data, bool successful){
-   BACNET_PROPERTY_REFERENCE *rpm_property;
-   BACNET_PROPERTY_REFERENCE *old_rpm_property;
-   BACNET_READ_ACCESS_DATA *old_rpm_data;
-   BACNET_APPLICATION_DATA_VALUE *value;
-   BACNET_APPLICATION_DATA_VALUE *old_value;     
 
-   // Get Data 
-   while (rpm_data) {
-      printf("HI\n\n");
-      if(successful){
-         rpm_ack_print_data(rpm_data);
-         read_result = decode_data(&rpm_data);
-      }
-      rpm_property = rpm_data->listOfProperties;
-
-      // Get Properties
-      while (rpm_property) {
-
-         // Get new values 
-         value = rpm_property->value;
-         while (value) {
-            old_value = value;
-            value = value->next;
-            free(old_value);
-         }
-
-         // release property
-         old_rpm_property = rpm_property;
-         rpm_property = rpm_property->next;
-         free(old_rpm_property);
-      }
-
-      // release data
-      old_rpm_data = rpm_data;
-      rpm_data = rpm_data->next;
-      free(old_rpm_data);
-   }
-}
 
 void Read_Multiple_Property_Ack_Handler(
     uint8_t * service_request,
@@ -310,7 +263,6 @@ void Read_Multiple_Property_Ack_Handler(
     bool successful = false;
     BACNET_READ_ACCESS_DATA *rpm_data;
 
-    fprintf(stdout, "MULTIPLE PROP HANDLER CHECKPOINT\n");
     // Allocate space
     rpm_data = calloc(1, sizeof(BACNET_READ_ACCESS_DATA));
     if (rpm_data) {
@@ -326,7 +278,7 @@ void Read_Multiple_Property_Ack_Handler(
     }else{
       fprintf(stdout, "DECODING DATA!\n");
     }
-    handleRPMData(rpm_data, successful);
+    read_result = handleRPMData(rpm_data, successful);
 }
 
 /** Handler for a ReadRangeProperty ACK. */
@@ -753,7 +705,6 @@ static int wait_reply(uint8_t invoke_id) {
 
         // Is the id no longer being used?
         if (tsm_invoke_id_free(invoke_id)) {
-            printf("Invoke ID freed.\n");
             break;
 
         // Did we fail to get a message?
@@ -933,12 +884,9 @@ PyObject *read_multiple_prop(PyObject *dev, PyObject *objectList){
 
    // Parse Object List
    int listSize;
-   PyObject *strObj;
+   PyObject *entry;
    int line;
    int i, j;
-
-   // Number of arguments per request
-   int ARG_SIZE = 4;
 
    // Bacnet Variables
    BACNET_READ_ACCESS_DATA *rpm_object;
@@ -964,29 +912,23 @@ PyObject *read_multiple_prop(PyObject *dev, PyObject *objectList){
 
    if(listSize <= 0) return NULL;
 
-   // Data should be grouped in 4s
-   if(listSize % ARG_SIZE != 0){
-      PyErr_Format(PyExc_ValueError, "Needs to be divisible by 4");
-      return NULL;
-   }
-
    rpm_object = calloc(1, sizeof(BACNET_READ_ACCESS_DATA));
 
    // Keep track of head
    head = rpm_object;
 
    // Form a packet
-   for(i = 0; i< listSize/ARG_SIZE; i++){
-      rpm_object->object_type = PyInt_AsLong(PyList_GetItem(objectList, i*ARG_SIZE + 0));
-      rpm_object->object_instance = PyInt_AsLong(PyList_GetItem(objectList, i*ARG_SIZE + 1));
+   for(i = 0; i< listSize; i++){
+      entry = PyList_GetItem(objectList, i);
+      rpm_object->object_type = PyInt_AsLong(PyDict_GetItemString(entry, "object_type"));
+      rpm_object->object_instance = PyInt_AsLong(PyDict_GetItemString(entry, "object_instance"));
       
-      // Currently we only accept a single pair of prop identifier and array position 
       // Allocate space for the property
       rpm_property = calloc(1, sizeof(BACNET_PROPERTY_REFERENCE));
       rpm_object->listOfProperties = rpm_property;
 
-      rpm_property->propertyIdentifier = PyInt_AsLong(PyList_GetItem(objectList, i*ARG_SIZE + 2));
-      rpm_property->propertyArrayIndex = PyInt_AsLong(PyList_GetItem(objectList, i*ARG_SIZE + 3));
+      rpm_property->propertyIdentifier = PyInt_AsLong(PyDict_GetItemString(entry, "object_property"));
+      rpm_property->propertyArrayIndex = PyInt_AsLong(PyDict_GetItemString(entry, "array_index"));
 
       // Set to read all if less then 0
       if(rpm_property->propertyArrayIndex < 0){
@@ -998,25 +940,22 @@ PyObject *read_multiple_prop(PyObject *dev, PyObject *objectList){
       if( !(checkObjectType(rpm_object->object_type)
             && checkObjectInstance(rpm_object->object_instance)
             && checkObjectPropertyID(rpm_property->propertyIdentifier)) ){
-         // REMEMBER TO FREE MEMORY OR YOU WILL GET A LEAK HERE!
+         // TODO: FREE MEMORY OR YOU WILL GET A LEAK HERE!
          return NULL; 
       }
 
-      printf("Object Type: %d\nObject Instance: %d\nIdentifier:%d\nArray:%d\n"
-            , rpm_object->object_type, rpm_object->object_instance, rpm_object->listOfProperties->propertyIdentifier, rpm_object->listOfProperties->propertyArrayIndex );
+//      printf("Object Type: %d\nObject Instance: %d\nIdentifier:%d\nArray:%d\n"
+ //           , rpm_object->object_type, rpm_object->object_instance, rpm_object->listOfProperties->propertyIdentifier, rpm_object->listOfProperties->propertyArrayIndex );
 
       // If we are not the last value, add to link list
-      if(i+1 != listSize/ARG_SIZE){
-         printf("Another value\n");
+      if(i < listSize-1){
          rpm_object->next = calloc(1, sizeof(BACNET_PROPERTY_REFERENCE));
          rpm_object = rpm_object->next;
       }else{
-         printf("That is a wrap\n");
          break;
       }
    }
 
-   fprintf(stdout, "Packet Made\n");
 
    rpm_object = head;
 
@@ -1040,7 +979,6 @@ PyObject *read_multiple_prop(PyObject *dev, PyObject *objectList){
    read_result = NULL;
 
    if (wait_reply(invoke_id) && read_result != NULL) {
-       fprintf(stdout, "EURIKA\n");
        tsm_free_invoke_id(invoke_id);
        pthread_mutex_unlock(&busy);
        return read_result;
