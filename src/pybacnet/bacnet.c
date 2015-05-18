@@ -18,13 +18,13 @@
 /*
  * Copyright (c) 2013 Building Robotics, Inc.
  */
+#include <Python.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 #include <errno.h>
-#include <Python.h>
 #include <assert.h>
 #include <pthread.h>
 
@@ -240,7 +240,6 @@ void My_Read_Property_Ack_Handler(
     BACNET_READ_PROPERTY_DATA data;
 
     len = rp_ack_decode_service_request(service_request, service_len, &data);
-    fprintf(stderr, "receive: %i %i\n", service_data->invoke_id, outstanding.invoke_id);
     if (len > 0 &&
         outstanding.dest &&
         address_match(src, outstanding.dest)) {
@@ -275,10 +274,8 @@ void Read_Multiple_Property_Ack_Handler(
     // Log Failure
     if(!successful){
       fprintf(stderr, "RPM Ack Malformed! Freeing memory...\n");
-    }else{
-      fprintf(stdout, "DECODING DATA!\n");
     }
-    read_result = handleRPMData(rpm_data, successful);
+    read_result = handleRPMData(rpm_data);
 }
 
 /** Handler for a ReadRangeProperty ACK. */
@@ -291,11 +288,10 @@ void My_Read_Range_Property_Ack_Handler(
     BACNET_READ_RANGE_DATA data;
 
     len = rr_ack_decode_service_request(service_request, service_len, &data);
-    // fprintf(stderr, "receive: %i %i\n", service_data->invoke_id, outstanding.invoke_id);
     if (len > 0 &&
         outstanding.dest &&
         address_match(src, outstanding.dest)) {
-            read_result = decode_data(&data);
+            read_result = decode_data((struct BACNET_READ_PROPERTY_DATA *)&data);
         }
 }
 
@@ -312,7 +308,7 @@ void My_Atomic_Write_File_Ack_Handler(
     if (len > 0 &&
 	outstanding.dest &&
 	address_match(src, outstanding.dest)) {
-	read_result = PyString_FromStringAndSize(data.fileData.value,
+	read_result = PyString_FromStringAndSize( (const char *)data.fileData.value,
 						 data.fileData.length);
     }
 }
@@ -330,7 +326,7 @@ void My_Atomic_Read_File_Ack_Handler(
     if (len > 0 &&
 	outstanding.dest &&
 	address_match(src, outstanding.dest)) {
-	read_result = PyString_FromStringAndSize(data.fileData.value,
+	read_result = PyString_FromStringAndSize((const char *)data.fileData.value,
 						 data.fileData.length);
     }
 }
@@ -379,14 +375,14 @@ void Init(char *interface, char *port) {
         handler_read_property);
     */
     apdu_set_confirmed_ack_handler(SERVICE_CONFIRMED_READ_PROPERTY,
-        My_Read_Property_Ack_Handler);
+        (confirmed_ack_function) My_Read_Property_Ack_Handler);
     apdu_set_confirmed_handler(SERVICE_CONFIRMED_READ_RANGE,
-        My_Read_Range_Property_Ack_Handler);
+        (confirmed_function) My_Read_Range_Property_Ack_Handler);
 
     apdu_set_confirmed_handler(SERVICE_CONFIRMED_READ_PROP_MULTIPLE,
-      Read_Multiple_Property_Ack_Handler);
+      (confirmed_function) Read_Multiple_Property_Ack_Handler);
     apdu_set_confirmed_ack_handler(SERVICE_CONFIRMED_READ_PROP_MULTIPLE,
-      Read_Multiple_Property_Ack_Handler);
+      (confirmed_ack_function) Read_Multiple_Property_Ack_Handler);
 
 
     apdu_set_confirmed_simple_ack_handler(SERVICE_CONFIRMED_WRITE_PROPERTY,
@@ -439,7 +435,7 @@ static int array_from_list(PyObject *list, uint8_t *array, unsigned int maxlen) 
 
 
 /* Tao -- I added the whois with range for better deivce discovery.
- * Some of the devices might ignor the -1 range.
+ * Some of the devices might ignore the -1 range.
  */
 PyObject *whois_range(unsigned int timeout_seconds, unsigned int range_start, unsigned int range_end) {
     int i;
@@ -456,9 +452,6 @@ PyObject *whois_range(unsigned int timeout_seconds, unsigned int range_start, un
 
     Error_Detected = false;
     /* Send whois message with the given range */
-    /*
-    Send_WhoIs(-1, -1);
-    */
     Send_WhoIs(range_start, range_end);
 
     outstanding.invoke_id = 0;
@@ -515,71 +508,7 @@ PyObject *whois_range(unsigned int timeout_seconds, unsigned int range_start, un
 }
 
 PyObject *whois(unsigned int timeout_seconds) {
-    int i; 
-    BACNET_ADDRESS address;
-    uint32_t device_id = 0;
-    unsigned max_apdu = 0;
-
-    BACNET_ADDRESS src = { 0 };
-    uint16_t pdu_len = 0;
-    time_t current_seconds = 0;
-    time_t last_seconds = time(NULL);
-    time_t total_seconds = 0;
-    PyObject * ret = NULL;
-
-    Error_Detected = false;
-    Send_WhoIs(-1, -1);
-    outstanding.invoke_id = 0;
-    outstanding.dest = NULL;
-
-    Py_BEGIN_ALLOW_THREADS;
-    pthread_mutex_lock(&busy);
-    Py_END_ALLOW_THREADS;
-
-    while(true) {
-        /* increment timer - exit if timed out */
-        current_seconds = time(NULL);
-
-        /* returns 0 bytes on timeout */
-        Py_BEGIN_ALLOW_THREADS;
-        pdu_len = datalink_receive(&src, &Rx_Buf[0], MAX_MPDU, 100);
-        Py_END_ALLOW_THREADS;
-        if (pdu_len) {
-            npdu_handler(&src, &Rx_Buf[0], pdu_len);
-        }
-        if (Error_Detected) {
-            break;
-        }
-
-        /* increment timer - exit if timed out */
-        total_seconds += current_seconds - last_seconds;
-        last_seconds = current_seconds;
-        if (total_seconds > timeout_seconds) {
-            break;
-        }
-    }
-    pthread_mutex_unlock(&busy);
-
-    /* Pull the servers we got */ 
-    ret = PyList_New(0);
-    if (!ret)  {
-        PyErr_SetNone(PyExc_MemoryError);
-        return NULL;
-    }
-    for (i = 0; i < MAX_ADDRESS_CACHE; i++) {
-        if (address_get_by_index(i, &device_id, &max_apdu, &address)) {
-            PyObject *rec = PyDict_New();
-            PyDict_SetItemString_Steal(rec, "device_id", Py_BuildValue("I",device_id));
-            PyDict_SetItemString_Steal(rec, "max_apdu", Py_BuildValue("I",max_apdu));
-            PyDict_SetItemString_Steal(rec, "mac", list_from_array(address.mac, address.mac_len));
-            PyDict_SetItemString_Steal(rec, "net", Py_BuildValue("I",address.net));
-            PyDict_SetItemString_Steal(rec, "adr", list_from_array(address.adr, address.len));
-
-            PyList_Append_Steal(ret, rec);
-        }
-    }
-
-    return ret;
+   return whois_range(timeout_seconds, -1, -1);
 }
 
 static int parse_dev(PyObject *dev, uint32_t *device_id, unsigned *max_apdu, BACNET_ADDRESS *dest) {
@@ -645,7 +574,7 @@ static uint8_t send_req(command_type_t type, BACNET_ADDRESS *dest, unsigned max_
     } else if (type == ATOMIC_READ_FILE) {
         len = arf_encode_apdu(&Handler_Transmit_Buffer[pdu_len],
                               invoke_id,
-                              (BACNET_ATOMIC_WRITE_FILE_DATA *)data);
+                              (BACNET_ATOMIC_READ_FILE_DATA *)data);
     } else {
 	PyErr_SetString(PyExc_ValueError, "send_req: invalid request type");
         return 0;
@@ -664,7 +593,7 @@ static uint8_t send_req(command_type_t type, BACNET_ADDRESS *dest, unsigned max_
                               &Handler_Transmit_Buffer[0], pdu_len);
         if (bytes_sent <= 0) {
             tsm_free_invoke_id(invoke_id);
-            PyErr_Format(PyExc_IOError, "Failed to Send Request (%s)!!");
+            PyErr_Format(PyExc_IOError, "Failed to Send Request!!");
             return 0;
         }
     } else {
@@ -728,7 +657,6 @@ static int wait_reply(uint8_t invoke_id) {
              * here we use &tmp because in bacnet-stack-0.6.0, the len field in the BACNET_ADDRESS
              * struct gets set to 0 in the case of an NPDU error
              */
-            printf("Handler called %d\n", pdu_len);
             npdu_handler(&tmp, &Rx_Buf[0], pdu_len);
         }
 
@@ -815,7 +743,7 @@ PyObject *read_prop(PyObject *dev, uint32_t object_type, uint32_t object_instanc
     } else {
         tsm_free_invoke_id(invoke_id);
         // Tao
-        printf("Reply timeout for %d\n", invoke_id);
+//        printf("Reply timeout for %d\n", invoke_id);
         pthread_mutex_unlock(&busy);
         return NULL;    /* SDH : wait_reply sets the exception code */
     }
@@ -837,7 +765,7 @@ PyObject *read_rangeprop(PyObject *dev, uint32_t object_type, uint32_t object_in
    
     /* Unpack device object */ 
     if (!parse_dev(dev, &device_id, &max_apdu, &dest)) {
-        PyErr_SetNone(PyExc_ValueError);
+        PyErr_Format(PyExc_ValueError, "Unable to unpack dev header.");
         return NULL;
     }
 
@@ -877,22 +805,20 @@ PyObject *read_rangeprop(PyObject *dev, uint32_t object_type, uint32_t object_in
 
 PyObject *read_multiple_prop(PyObject *dev, PyObject *objectList){
    // objectList
-   // objectList[0] = object_type
-   // objectList[1] = object_instance
-   // objectList[2] = object_property
-   // objectList[3] = array_index
+   // objectList["object_type"]
+   // objectList["object_instance"]
+   // objectList["object_property"]
+   // objectList["array_index"]
 
    // Parse Object List
    int listSize;
    PyObject *entry;
-   int line;
-   int i, j;
+   int i;
 
    // Bacnet Variables
    BACNET_READ_ACCESS_DATA *rpm_object;
    BACNET_READ_ACCESS_DATA *head;
    BACNET_PROPERTY_REFERENCE *rpm_property;
-   uint8_t buffer[MAX_PDU] = {0};
 
    uint32_t device_id;
    unsigned max_apdu = 0;
@@ -903,14 +829,17 @@ PyObject *read_multiple_prop(PyObject *dev, PyObject *objectList){
    
     /* Unpack device object */ 
     if (!parse_dev(dev, &device_id, &max_apdu, &dest)) {
-        PyErr_SetNone(PyExc_ValueError);
+        PyErr_Format(PyExc_ValueError, "Unable to unpack dev header.");
         return NULL;
     }
 
    if (! PyList_Check(objectList)) return NULL;
    listSize = PyList_Size(objectList);
 
-   if(listSize <= 0) return NULL;
+   if(listSize <= 0){
+      PyErr_Format(PyExc_ValueError, "No data was passed");
+      return NULL;
+   }
 
    rpm_object = calloc(1, sizeof(BACNET_READ_ACCESS_DATA));
 
@@ -932,7 +861,7 @@ PyObject *read_multiple_prop(PyObject *dev, PyObject *objectList){
 
       // Set to read all if less then 0
       if(rpm_property->propertyArrayIndex < 0){
-         rpm_property->propertyArrayIndex = -1; 
+         rpm_property->propertyArrayIndex = BACNET_ARRAY_ALL; 
       }
       rpm_property->next = NULL;
 
@@ -944,8 +873,6 @@ PyObject *read_multiple_prop(PyObject *dev, PyObject *objectList){
          return NULL; 
       }
 
-//      printf("Object Type: %d\nObject Instance: %d\nIdentifier:%d\nArray:%d\n"
- //           , rpm_object->object_type, rpm_object->object_instance, rpm_object->listOfProperties->propertyIdentifier, rpm_object->listOfProperties->propertyArrayIndex );
 
       // If we are not the last value, add to link list
       if(i < listSize-1){
@@ -964,7 +891,6 @@ PyObject *read_multiple_prop(PyObject *dev, PyObject *objectList){
    Py_END_ALLOW_THREADS;
 
    // Send Request
-   fprintf(stdout, "Sending Request\n");
    invoke_id = send_req(READ_MULTIPLE_PROPERTY, &dest, max_apdu, rpm_object);
 
    // Request Failed
@@ -975,16 +901,14 @@ PyObject *read_multiple_prop(PyObject *dev, PyObject *objectList){
    outstanding.invoke_id = invoke_id;
    outstanding.dest = &dest;
 
-   fprintf(stdout, "Request Sent Succesfully\n");
    read_result = NULL;
-
    if (wait_reply(invoke_id) && read_result != NULL) {
        tsm_free_invoke_id(invoke_id);
        pthread_mutex_unlock(&busy);
        return read_result;
    } else {
        tsm_free_invoke_id(invoke_id);
-       printf("Reply time out for %d with val %d\n", invoke_id, read_result);
+       printf("Reply time out for %d", invoke_id);
 
        if(read_result == NULL){
          PyErr_Format(PyExc_ValueError, "Data was not read.");

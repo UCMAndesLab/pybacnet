@@ -1,26 +1,13 @@
-#include "read_multiple_properties.h"
+#include <Python.h>
+#define BACTEXT_PRINT_ENABLED 1
 #include "bacapp.h"
 #include "stdio.h"
 #include "rpm.h"
 #include "handlers.h"
 #include "swig_helper.h"
-#include <Python.h>
+#include "bactext.h"
 
-void read_multiple_prop_decode(BACNET_READ_ACCESS_DATA *rpm_data, BACNET_PROPERTY_REFERENCE *listOfProperties, BACNET_APPLICATION_DATA_VALUE *value){
-   BACNET_OBJECT_PROPERTY_VALUE object_value;
-   object_value.object_type = rpm_data->object_type;
-   object_value.object_instance = rpm_data->object_instance;
-   object_value.object_property = listOfProperties->propertyIdentifier;
-   object_value.array_index = listOfProperties->propertyArrayIndex;
-
-   object_value.value = value;
-
-   printf("Data Received:\n");
-   printf("Type: %d Instance: %d Property: %d Index: %d", object_value.object_type, object_value.object_instance , object_value.object_property, object_value.array_index);
-   printf("Data:");
-   print_value(value);
-   printf("\n-----------------\n");
-}
+#include "read_multiple_properties.h"
 
 void print_value(BACNET_APPLICATION_DATA_VALUE *value){
    switch (value->tag) {
@@ -57,17 +44,17 @@ void print_value(BACNET_APPLICATION_DATA_VALUE *value){
 // Moving decode here
 PyObject * bacnet_value_to_python(BACNET_APPLICATION_DATA_VALUE *value){
    switch (value->tag) {
-//      case BACNET_APPLICATION_TAG_OBJECT_ID:
-//      {
-//        PyObject *rec = PyDict_New();
-//        PyDict_SetItemString_Steal(rec, "type", Py_BuildValue("i",value->type.Object_Id.type));
-//        if (value->type.Object_Id.type < MAX_ASHRAE_OBJECT_TYPE) {
-//          PyDict_SetItemString_Steal(rec, "type_str", 
-//            Py_BuildValue("s",bactext_object_type_name(value->type.Object_Id.type)));
-//        }
-//        PyDict_SetItemString_Steal(rec, "instance", Py_BuildValue("i",value->type.Object_Id.instance));
-//        return rec;
-//      }
+      case BACNET_APPLICATION_TAG_OBJECT_ID:
+      {
+        PyObject *rec = PyDict_New();
+        PyDict_SetItemString_Steal(rec, "type", Py_BuildValue("i",value->type.Object_Id.type));
+        if (value->type.Object_Id.type < MAX_ASHRAE_OBJECT_TYPE) {
+          PyDict_SetItemString_Steal(rec, "type_str", 
+            Py_BuildValue("s",bactext_object_type_name(value->type.Object_Id.type)));
+        }
+        PyDict_SetItemString_Steal(rec, "instance", Py_BuildValue("i",value->type.Object_Id.instance));
+        return rec;
+      }
       case BACNET_APPLICATION_TAG_CHARACTER_STRING:
         return Py_BuildValue("s", value->type.Character_String.value);
         break;
@@ -99,8 +86,9 @@ PyObject * bacnet_value_to_python(BACNET_APPLICATION_DATA_VALUE *value){
    return Py_None;
 }
 
+
 // Free all rpm data and print if successful
-PyObject * handleRPMData(BACNET_READ_ACCESS_DATA *rpm_data, bool successful){
+PyObject * handleRPMData(BACNET_READ_ACCESS_DATA *rpm_data){
    BACNET_PROPERTY_REFERENCE *rpm_property;
    BACNET_PROPERTY_REFERENCE *old_rpm_property;
    BACNET_READ_ACCESS_DATA *old_rpm_data;
@@ -115,11 +103,8 @@ PyObject * handleRPMData(BACNET_READ_ACCESS_DATA *rpm_data, bool successful){
 
    // Get Data 
    while (rpm_data) {
-      if(successful){
-         rpm_ack_print_data(rpm_data);
-      }
       rpm_property = rpm_data->listOfProperties;
-
+//      rpm_ack_print_data(rpm_data);
       // Get Properties
       while (rpm_property) {
          // Get new values

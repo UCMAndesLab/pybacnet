@@ -35,6 +35,7 @@ const char * unit_str(unsigned index);
 
 %include "stdint.i"
 %include "bacenum.h"
+%include "bactext.h"
 void Init(char *interface, char *port);
 PyObject *whois(unsigned int timeout_seconds);
 PyObject *whois_range(unsigned int timeout_seconds, unsigned int range_start, unsigned int range_end);
